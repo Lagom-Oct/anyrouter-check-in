@@ -459,6 +459,11 @@ async def run_access_token_check_in_with_browser(
 			after_result = await browser_api_request(page, user_info_url, 'GET', headers)
 			return success, user_info_before, parse_browser_user_info(after_result)
 
+		if user_info_before.get('success'):
+			print(f'[INFO] {account_name}: Check-in completed automatically (triggered by browser user info request)')
+			return True, user_info_before, user_info_before
+
+		# 首次请求可能恰逢 WAF 临时响应，浏览器路径只额外重试一次。
 		after_result = await browser_api_request(page, user_info_url, 'GET', headers)
 		user_info_after = parse_browser_user_info(after_result)
 		if user_info_after.get('success'):
@@ -551,6 +556,16 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	elif account.has_access_token():
 		auth_method = 'access token'
 		print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
+		http_result = run_check_in_requests(
+			{},
+			account,
+			account_name,
+			provider_config,
+			use_proxy=provider_config.use_proxy,
+		)
+		if http_result[0]:
+			return http_result
+		print(f'[WARN] {account_name}: HTTP token request failed, trying browser fallback')
 		return await run_access_token_check_in_with_browser(account, account_name, provider_config)
 	else:
 		user_cookies = parse_cookies(account.cookies)
@@ -586,7 +601,9 @@ def run_check_in_requests(
 ) -> tuple[bool, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
-		client_kwargs: dict = {'http2': True, 'timeout': 30.0}
+		# AgentRouter 的 WAF 对 HTTP/2 + 伪造 Sec-Fetch 请求头较敏感；
+		# 访问令牌请求使用更接近普通桌面浏览器导航的精简 HTTP/1.1 请求。
+		client_kwargs: dict = {'http2': not account.access_token, 'timeout': 30.0}
 		proxy_url = get_proxy_server(use_proxy=use_proxy)
 		if proxy_url:
 			client_kwargs['proxy'] = proxy_url
@@ -600,18 +617,27 @@ def run_check_in_requests(
 		with httpx.Client(**client_kwargs) as client:
 			client.cookies.update(all_cookies)
 
-			headers = {
-				'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-				'Accept': 'application/json, text/plain, */*',
-				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-				'Accept-Encoding': 'gzip, deflate, br, zstd',
-				'Referer': provider_config.domain,
-				'Origin': provider_config.domain,
-				'Connection': 'keep-alive',
-				'Sec-Fetch-Dest': 'empty',
-				'Sec-Fetch-Mode': 'cors',
-				'Sec-Fetch-Site': 'same-origin',
-			}
+			if account.access_token:
+				headers = {
+					'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+					'AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36',
+					'Accept': 'application/json, text/plain, */*',
+					'Referer': f'{provider_config.domain.rstrip("/")}/',
+				}
+			else:
+				headers = {
+					'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+					'(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+					'Accept': 'application/json, text/plain, */*',
+					'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+					'Accept-Encoding': 'gzip, deflate, br, zstd',
+					'Referer': provider_config.domain,
+					'Origin': provider_config.domain,
+					'Connection': 'keep-alive',
+					'Sec-Fetch-Dest': 'empty',
+					'Sec-Fetch-Mode': 'cors',
+					'Sec-Fetch-Site': 'same-origin',
+				}
 
 			api_user = api_user_override or account.api_user
 			if api_user:
@@ -632,6 +658,11 @@ def run_check_in_requests(
 				user_info_after = get_user_info(client, headers, user_info_url)
 				return success, user_info_before, user_info_after
 
+			if user_info_before and user_info_before.get('success'):
+				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
+				return True, user_info_before, user_info_before
+
+			# 自动签到 Provider 无需固定请求两次；首次失败时再重试一次即可。
 			user_info_after = get_user_info(client, headers, user_info_url)
 			if user_info_after and user_info_after.get('success'):
 				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')

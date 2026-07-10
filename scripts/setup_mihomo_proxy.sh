@@ -3,6 +3,7 @@
 # 环境变量:
 #   PROXY_SUBSCRIPTION_URL  订阅链接（必填才启用）
 #   PROXY_TEST_URL          探测目标，默认 https://www.google.com/generate_204
+#   PROXY_NODE_FILTER       可选，mihomo 正则，仅保留匹配的订阅节点
 #   PROXY_REQUIRED          true 时探测失败则退出 1
 #   PROXY_PORT              本地 mixed-port，默认 7890
 
@@ -16,6 +17,7 @@ fi
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
+PROXY_NODE_FILTER="${PROXY_NODE_FILTER:-}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 
@@ -36,6 +38,13 @@ gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
 
+PROVIDER_FILTER_CONFIG=""
+if [[ -n "${PROXY_NODE_FILTER}" ]]; then
+	# 节点名来自可信的私有配置；单引号可避免 YAML 把正则反斜杠当转义符。
+	PROVIDER_FILTER_CONFIG="    filter: '${PROXY_NODE_FILTER}'"
+	echo "[INFO] Applying proxy node filter"
+fi
+
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
 allow-lan: false
@@ -50,6 +59,7 @@ proxy-providers:
     url: "${PROXY_SUBSCRIPTION_URL}"
     interval: 3600
     path: ./subscription.yaml
+${PROVIDER_FILTER_CONFIG}
     health-check:
       enable: true
       interval: 300

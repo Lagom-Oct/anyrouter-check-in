@@ -81,6 +81,7 @@ def test_run_check_in_requests_sends_bearer_token_and_user_header(monkeypatch):
 	assert before and before['success'] is True
 	assert after and after['success'] is True
 	assert request_headers
+	assert len(request_headers) == 1
 	assert all(headers['Authorization'] == 'Bearer secret-token' for headers in request_headers)
 	assert all(headers['new-api-user'] == '197424' for headers in request_headers)
 
@@ -100,7 +101,7 @@ def test_build_access_token_headers():
 	assert headers['new-api-user'] == '197424'
 
 
-async def test_check_in_account_uses_browser_for_access_token(monkeypatch):
+async def test_check_in_account_uses_http_for_access_token(monkeypatch):
 	account = AccountConfig(
 		cookies=None,
 		api_user='197424',
@@ -108,23 +109,68 @@ async def test_check_in_account_uses_browser_for_access_token(monkeypatch):
 		name='AgentRouter',
 		access_token='secret-token',
 	)
-	provider = SimpleNamespace(domain='https://agentrouter.org')
+	provider = SimpleNamespace(domain='https://agentrouter.org', use_proxy=True)
 	app_config = AppConfig(providers={'agentrouter': provider})
 	expected = (True, {'success': True}, {'success': True})
 	called = {}
 
-	async def fake_browser_check_in(received_account, account_name, received_provider):
+	def fake_http_check_in(cookies, received_account, account_name, received_provider, **kwargs):
+		called['cookies'] = cookies
 		called['account'] = received_account
 		called['name'] = account_name
 		called['provider'] = received_provider
+		called['use_proxy'] = kwargs['use_proxy']
 		return expected
 
+	async def fail_if_browser_used(*args, **kwargs):
+		raise AssertionError('browser fallback should not run after successful HTTP request')
+
+	monkeypatch.setattr(checkin, 'run_check_in_requests', fake_http_check_in)
+	monkeypatch.setattr(checkin, 'run_access_token_check_in_with_browser', fail_if_browser_used)
+
+	result = await checkin.check_in_account(account, 0, app_config)
+
+	assert result == expected
+	assert called == {
+		'cookies': {},
+		'account': account,
+		'name': 'AgentRouter',
+		'provider': provider,
+		'use_proxy': True,
+	}
+
+
+async def test_check_in_account_falls_back_to_browser_after_http_failure(monkeypatch):
+	account = AccountConfig(
+		cookies=None,
+		api_user='197424',
+		provider='agentrouter',
+		name='AgentRouter',
+		access_token='secret-token',
+	)
+	provider = SimpleNamespace(domain='https://agentrouter.org', use_proxy=True)
+	app_config = AppConfig(providers={'agentrouter': provider})
+	expected = (True, {'success': True}, {'success': True})
+	browser_calls = 0
+
+	def fake_http_check_in(*args, **kwargs):
+		return False, None, None
+
+	async def fake_browser_check_in(received_account, account_name, received_provider):
+		nonlocal browser_calls
+		browser_calls += 1
+		assert received_account is account
+		assert account_name == 'AgentRouter'
+		assert received_provider is provider
+		return expected
+
+	monkeypatch.setattr(checkin, 'run_check_in_requests', fake_http_check_in)
 	monkeypatch.setattr(checkin, 'run_access_token_check_in_with_browser', fake_browser_check_in)
 
 	result = await checkin.check_in_account(account, 0, app_config)
 
 	assert result == expected
-	assert called == {'account': account, 'name': 'AgentRouter', 'provider': provider}
+	assert browser_calls == 1
 
 
 async def test_access_token_browser_session_is_reused(monkeypatch):
