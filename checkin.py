@@ -350,6 +350,141 @@ def format_check_in_notification(detail: dict) -> str:
 	return '\n'.join(lines)
 
 
+def build_access_token_headers(account: AccountConfig, provider_config) -> dict[str, str]:
+	"""构造系统访问令牌认证头，不记录令牌内容。"""
+	if not account.access_token or not account.api_user:
+		raise ValueError('access_token authentication requires api_user')
+	return {
+		'Authorization': f'Bearer {account.access_token}',
+		provider_config.api_user_key: account.api_user,
+		'Accept': 'application/json, text/plain, */*',
+		'Content-Type': 'application/json',
+		'X-Requested-With': 'XMLHttpRequest',
+	}
+
+
+async def browser_api_request(page, url: str, method: str, headers: dict[str, str]) -> dict:
+	"""在浏览器上下文中请求 API，复用同一浏览器指纹与 WAF 会话。"""
+	return await page.evaluate(
+		"""async ({ url, method, headers }) => {
+			const response = await fetch(url, {
+				method,
+				headers,
+				credentials: 'include'
+			});
+			const text = await response.text();
+			let payload = null;
+			try { payload = JSON.parse(text); } catch {}
+			return {
+				status: response.status,
+				contentType: response.headers.get('content-type') || '',
+				payload,
+				bodyKind: payload ? 'json' : (text.trim().startsWith('<') ? 'html' : 'text')
+			};
+		}""",
+		{'url': url, 'method': method, 'headers': headers},
+	)
+
+
+def parse_browser_user_info(result: dict) -> dict:
+	"""把浏览器 API 响应转换为现有余额结果格式。"""
+	status = result.get('status')
+	payload = result.get('payload')
+	if status == 200 and isinstance(payload, dict) and payload.get('success'):
+		user_data = payload.get('data', {})
+		quota = round(user_data.get('quota', 0) / 500000, 2)
+		used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+		return {
+			'success': True,
+			'quota': quota,
+			'used_quota': used_quota,
+			'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+		}
+	if status != 200:
+		return {'success': False, 'error': f'Failed to get user info: HTTP {status}'}
+	body_kind = result.get('bodyKind', 'unknown')
+	return {'success': False, 'error': f'Failed to get user info: unexpected {body_kind} response'}
+
+
+def browser_check_in_succeeded(result: dict, account_name: str) -> bool:
+	"""判断浏览器内签到请求是否成功。"""
+	status = result.get('status')
+	payload = result.get('payload')
+	if status != 200:
+		print(f'[FAILED] {account_name}: Check-in failed - HTTP {status}')
+		return False
+	if not isinstance(payload, dict):
+		body_kind = result.get('bodyKind', 'unknown')
+		print(f'[FAILED] {account_name}: Check-in failed - unexpected {body_kind} response')
+		return False
+	if payload.get('ret') == 1 or payload.get('code') == 0 or payload.get('success'):
+		print(f'[SUCCESS] {account_name}: Check-in successful!')
+		return True
+	error_msg = payload.get('msg', payload.get('message', 'Unknown error'))
+	already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+	if any(keyword in str(error_msg).lower() for keyword in already_checked_keywords):
+		print(f'[SUCCESS] {account_name}: Already checked in today')
+		return True
+	print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
+	return False
+
+
+async def run_access_token_check_in_with_browser(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+) -> tuple[bool, dict | None, dict | None]:
+	"""使用浏览器原生 fetch 完成令牌认证，避免 WAF 拦截独立 HTTP 客户端。"""
+	settings = load_browser_login_settings(
+		account_name,
+		account.provider,
+		persist_profile=provider_config.persist_profile,
+	)
+	try:
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+	except Exception as exc:
+		print(f'[FAILED] {account_name}: Browser launch failed: {exc}')
+		return False, None, None
+
+	try:
+		page = await context.new_page()
+		await prepare_browser_page(page)
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		print(f'[PROCESSING] {account_name}: Preparing browser session for access token authentication...')
+		await page.goto(login_url, wait_until='domcontentloaded', timeout=min(settings.wait_timeout_ms, 60_000))
+		await wait_for_waf_ready(page, settings.wait_timeout_ms)
+
+		headers = build_access_token_headers(account, provider_config)
+		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+		before_result = await browser_api_request(page, user_info_url, 'GET', headers)
+		user_info_before = parse_browser_user_info(before_result)
+		if user_info_before.get('success'):
+			print(user_info_before['display'])
+		else:
+			print(user_info_before.get('error', 'Unknown error'))
+
+		if provider_config.needs_manual_check_in():
+			sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
+			check_in_result = await browser_api_request(page, sign_in_url, 'POST', headers)
+			success = browser_check_in_succeeded(check_in_result, account_name)
+			after_result = await browser_api_request(page, user_info_url, 'GET', headers)
+			return success, user_info_before, parse_browser_user_info(after_result)
+
+		after_result = await browser_api_request(page, user_info_url, 'GET', headers)
+		user_info_after = parse_browser_user_info(after_result)
+		if user_info_after.get('success'):
+			print(f'[INFO] {account_name}: Check-in completed automatically (triggered by browser user info request)')
+			return True, user_info_before, user_info_after
+		error = user_info_after.get('error', 'Unknown error')
+		print(f'[FAILED] {account_name}: Auto check-in failed - {error}')
+		return False, user_info_before, user_info_after
+	except Exception as exc:
+		print(f'[FAILED] {account_name}: Browser access token check-in failed - {str(exc)[:80]}...')
+		return False, None, None
+	finally:
+		await context.close()
+
+
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作"""
 	account_name = account.get_display_name(account_index)
@@ -384,8 +519,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
 			return False, None, None
 	elif account.has_access_token():
-		all_cookies = await prepare_cookies(account_name, provider_config, {})
 		auth_method = 'access token'
+		print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
+		return await run_access_token_check_in_with_browser(account, account_name, provider_config)
 	else:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
