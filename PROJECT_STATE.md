@@ -5,6 +5,7 @@
 - GitHub Actions 已部署到 Fork 的 `main` 分支，每 6 小时自动运行一次，也支持手动触发。
 - 已配置 4 个 AnyRouter 账号和 3 个 AgentRouter 访问令牌账号。
 - AgentRouter 第 3 个账号使用数字用户 ID `197632`。
+- 已配置 QQ 邮箱通知，SMTP 授权信息保存在 GitHub Environment Secrets 中。
 - 敏感配置保存在 GitHub `production` Environment Secrets 中，仓库不包含明文凭据。
 
 ## 关键实现
@@ -21,7 +22,9 @@
 - Pytest：27 passed，1 skipped。
 - GitHub Actions run `29086336275`：7/7 成功，0/7 失败。
 - 对应功能提交：`d033ea4`。
+- QQ SMTP 测试邮件：发送成功。
 
 ## 最近完成
 
 - 【Codex】【2026-07-10】完成 GitHub Actions 自动签到部署、AgentRouter 访问令牌适配、代理节点固定与云端 7/7 验证。
+- 【Codex】【2026-07-10】完成 QQ 邮箱通知配置，并通过 SMTP 实际发送测试邮件。
