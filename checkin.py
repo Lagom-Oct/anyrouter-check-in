@@ -362,7 +362,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
-	# 邮箱密码优先
+	# 邮箱密码优先，其次系统访问令牌，最后 session cookies
 	all_cookies = None
 	resolved_api_user: str | None = None
 	auth_method = None
@@ -383,6 +383,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		else:
 			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
 			return False, None, None
+	elif account.has_access_token():
+		all_cookies = await prepare_cookies(account_name, provider_config, {})
+		auth_method = 'access token'
 	else:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
@@ -447,6 +450,9 @@ def run_check_in_requests(
 			api_user = api_user_override or account.api_user
 			if api_user:
 				headers[provider_config.api_user_key] = api_user
+
+			if account.access_token:
+				headers['Authorization'] = f'Bearer {account.access_token}'
 
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url)

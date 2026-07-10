@@ -81,8 +81,9 @@
 **字段说明**：
 
 - `email` + `password`：推荐的浏览器登录方式，登录成功后会自动获取 cookies 与用户标识
+- `access_token`：系统访问令牌，配合 `api_user` 使用；适合 AgentRouter 等支持令牌认证的 NewAPI 平台
 - `cookies`：兼容旧版的 session cookies 登录方式
-- `api_user`：session cookies 登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
+- `api_user`：session cookies 或系统访问令牌登录时用于请求头的 new-api-user 参数；邮箱密码登录可省略
 - `provider` (可选)：指定使用的服务商，默认为 `anyrouter`
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
 
@@ -93,6 +94,19 @@
 - `anyrouter` 与 `agentrouter` 配置已内置，无需填写
 
 如果使用 session cookies 登录，接下来获取 cookies 与 api_user 的值。
+
+如果使用系统访问令牌，可按下面格式配置，无需保存账号密码或定期更新 session：
+
+```json
+[
+  {
+    "name": "AgentRouter 主账号",
+    "provider": "agentrouter",
+    "access_token": "your_system_access_token",
+    "api_user": "your_user_id"
+  }
+]
+```
 
 通过 F12 工具，切到 Application 面板，拿到 session 的值，最好重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
 
