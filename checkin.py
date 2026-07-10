@@ -41,6 +41,7 @@ from utils.proxy import get_playwright_proxy, get_proxy_server
 load_dotenv()
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+_access_token_browser_sessions: dict[str, tuple[object, object]] = {}
 
 
 def load_balance_hash():
@@ -435,25 +436,13 @@ async def run_access_token_check_in_with_browser(
 	provider_config,
 ) -> tuple[bool, dict | None, dict | None]:
 	"""使用浏览器原生 fetch 完成令牌认证，避免 WAF 拦截独立 HTTP 客户端。"""
-	settings = load_browser_login_settings(
-		account_name,
-		account.provider,
-		persist_profile=provider_config.persist_profile,
-	)
 	try:
-		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		_, page = await get_access_token_browser_page(account, account_name, provider_config)
 	except Exception as exc:
-		print(f'[FAILED] {account_name}: Browser launch failed: {exc}')
+		print(f'[FAILED] {account_name}: Browser session setup failed: {exc}')
 		return False, None, None
 
 	try:
-		page = await context.new_page()
-		await prepare_browser_page(page)
-		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		print(f'[PROCESSING] {account_name}: Preparing browser session for access token authentication...')
-		await page.goto(login_url, wait_until='domcontentloaded', timeout=min(settings.wait_timeout_ms, 60_000))
-		await wait_for_waf_ready(page, settings.wait_timeout_ms)
-
 		headers = build_access_token_headers(account, provider_config)
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 		before_result = await browser_api_request(page, user_info_url, 'GET', headers)
@@ -481,8 +470,49 @@ async def run_access_token_check_in_with_browser(
 	except Exception as exc:
 		print(f'[FAILED] {account_name}: Browser access token check-in failed - {str(exc)[:80]}...')
 		return False, None, None
-	finally:
+
+
+async def get_access_token_browser_page(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+):
+	"""同一 Provider 的令牌账号复用一个浏览器会话，减少 WAF 风控触发。"""
+	session_key = account.provider
+	cached = _access_token_browser_sessions.get(session_key)
+	if cached:
+		print(f'[INFO] {account_name}: Reusing browser session for access token authentication')
+		return cached
+
+	settings = load_browser_login_settings(
+		account_name,
+		account.provider,
+		persist_profile=provider_config.persist_profile,
+	)
+	context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+	try:
+		page = await context.new_page()
+		await prepare_browser_page(page)
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		print(f'[PROCESSING] {account_name}: Preparing shared browser session for access token authentication...')
+		await page.goto(login_url, wait_until='domcontentloaded', timeout=min(settings.wait_timeout_ms, 60_000))
+		await wait_for_waf_ready(page, settings.wait_timeout_ms)
+		_access_token_browser_sessions[session_key] = (context, page)
+		return context, page
+	except Exception:
 		await context.close()
+		raise
+
+
+async def close_access_token_browser_sessions() -> None:
+	"""关闭令牌认证复用的浏览器会话。"""
+	sessions = list(_access_token_browser_sessions.values())
+	_access_token_browser_sessions.clear()
+	for context, _ in sessions:
+		try:
+			await context.close()
+		except Exception:  # nosec B110
+			pass
 
 
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
@@ -715,6 +745,8 @@ async def main():
 			print(f'[FAILED] {account_name} processing exception: {e}')
 			need_notify = True
 			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+
+	await close_access_token_browser_sessions()
 
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 	if current_balance_hash:

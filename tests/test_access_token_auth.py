@@ -125,3 +125,50 @@ async def test_check_in_account_uses_browser_for_access_token(monkeypatch):
 
 	assert result == expected
 	assert called == {'account': account, 'name': 'AgentRouter', 'provider': provider}
+
+
+async def test_access_token_browser_session_is_reused(monkeypatch):
+	checkin._access_token_browser_sessions.clear()
+	account = AccountConfig(
+		cookies=None,
+		api_user='197424',
+		provider='agentrouter',
+		access_token='secret-token',
+	)
+	provider = SimpleNamespace(
+		login_path='/login',
+		persist_profile=False,
+		use_proxy=True,
+		domain='https://agentrouter.org',
+	)
+	launch_count = 0
+
+	class FakePage:
+		async def goto(self, *args, **kwargs):
+			return None
+
+	class FakeContext:
+		async def new_page(self):
+			return FakePage()
+
+		async def close(self):
+			return None
+
+	async def fake_launch(*args, **kwargs):
+		nonlocal launch_count
+		launch_count += 1
+		return FakeContext()
+
+	async def fake_noop(*args, **kwargs):
+		return None
+
+	monkeypatch.setattr(checkin, 'launch_login_context', fake_launch)
+	monkeypatch.setattr(checkin, 'prepare_browser_page', fake_noop)
+	monkeypatch.setattr(checkin, 'wait_for_waf_ready', fake_noop)
+
+	first = await checkin.get_access_token_browser_page(account, 'AgentRouter-1', provider)
+	second = await checkin.get_access_token_browser_page(account, 'AgentRouter-2', provider)
+
+	assert first == second
+	assert launch_count == 1
+	await checkin.close_access_token_browser_sessions()
