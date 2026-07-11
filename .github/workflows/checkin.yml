@@ -1,11 +1,17 @@
 name: AnyRouter / AgentRouter 自动签到
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 避开 GitHub Actions 整点高峰；北京时间约 02:17 / 08:17 / 14:17 / 20:17。
+    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       debug:
         description: 开启调试模式（截图 artifact、详细日志）
+        required: false
+        default: false
+        type: boolean
+      force_notify:
+        description: 忽略余额历史，本次强制发送首次通知
         required: false
         default: false
         type: boolean
@@ -71,6 +77,10 @@ jobs:
         restore-keys: |
           balance-hash-${{ github.ref_name }}-
           balance-hash-
+
+    - name: 强制本次发送首次通知
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.force_notify == 'true'
+      run: rm -f balance_hash.txt
 
     - name: 恢复浏览器 Profile 缓存
       uses: actions/cache@v5

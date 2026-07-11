@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-- GitHub Actions 已部署到 Fork 的 `main` 分支，每 6 小时自动运行一次，也支持手动触发。
+- GitHub Actions 已部署到 Fork 的 `main` 分支，每 6 小时自动运行一次，也支持手动触发和强制通知测试。
 - 已配置 4 个 AnyRouter 账号和 3 个 AgentRouter 访问令牌账号。
 - AgentRouter 第 3 个账号使用数字用户 ID `197632`。
 - 已配置 QQ 邮箱通知，SMTP 授权信息保存在 GitHub Environment Secrets 中。
@@ -14,6 +14,7 @@
 - 自动签到 Provider 首次用户信息请求成功后不再重复请求，降低 WAF 触发概率。
 - Mihomo 支持 `PROXY_NODE_FILTER`，工作流固定到已验证兼容 AgentRouter 的代理节点。
 - 代理配置失败会直接终止任务，避免 AgentRouter 在无代理状态下继续运行。
+- 定时任务避开 GitHub Actions 整点高峰，按 UTC 每 6 小时的第 17 分钟触发。
 
 ## 验证记录
 
