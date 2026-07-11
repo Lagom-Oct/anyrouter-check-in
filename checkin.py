@@ -41,6 +41,7 @@ from utils.proxy import get_playwright_proxy, get_proxy_server
 load_dotenv()
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
+BALANCE_STATE_FILE = 'balance_state.json'
 _access_token_browser_sessions: dict[str, tuple[object, object]] = {}
 
 
@@ -64,6 +65,27 @@ def save_balance_hash(balance_hash):
 		print(f'Warning: Failed to save balance hash: {e}')
 
 
+def load_balance_state() -> dict:
+	"""加载上一次运行的余额明细，用于跨运行计算实际签到奖励。"""
+	try:
+		if os.path.exists(BALANCE_STATE_FILE):
+			with open(BALANCE_STATE_FILE, 'r', encoding='utf-8') as f:
+				state = json.load(f)
+				return state if isinstance(state, dict) else {}
+	except Exception:  # nosec B110
+		pass
+	return {}
+
+
+def save_balance_state(balances: dict) -> None:
+	"""保存本次余额明细。"""
+	try:
+		with open(BALANCE_STATE_FILE, 'w', encoding='utf-8') as f:
+			json.dump(balances, f, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+	except Exception as e:
+		print(f'Warning: Failed to save balance state: {e}')
+
+
 def generate_balance_hash(balances):
 	"""生成余额数据的hash"""
 	simple_balances = (
@@ -71,6 +93,32 @@ def generate_balance_hash(balances):
 	)
 	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+
+
+def build_balance_comparison_detail(
+	name: str,
+	before: dict,
+	after: dict,
+	*,
+	success: bool,
+) -> dict:
+	"""按两次运行的余额快照计算奖励、使用量和余额变化。"""
+	before_quota = float(before.get('quota', 0))
+	before_used = float(before.get('used', 0))
+	after_quota = float(after.get('quota', 0))
+	after_used = float(after.get('used', 0))
+	return {
+		'name': name,
+		'before_quota': before_quota,
+		'before_used': before_used,
+		'after_quota': after_quota,
+		'after_used': after_used,
+		'check_in_reward': round((after_quota + after_used) - (before_quota + before_used), 2),
+		'usage_increase': round(after_used - before_used, 2),
+		'balance_change': round(after_quota - before_quota, 2),
+		'success': success,
+		'comparison_available': True,
+	}
 
 
 def parse_cookies(cookies_data):
@@ -326,6 +374,10 @@ def format_check_in_notification(detail: dict) -> str:
 		'  签到后',
 		f'     余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
 	]
+
+	if not detail.get('comparison_available', True):
+		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  已记录当前余额，等待下次运行比较实际变化'])
+		return '\n'.join(lines)
 
 	has_reward = detail['check_in_reward'] != 0
 	has_usage = detail['usage_increase'] != 0
@@ -707,12 +759,14 @@ async def main():
 	print(f'[INFO] Found {len(accounts)} account configurations')
 
 	last_balance_hash = load_balance_hash()
+	last_balances = load_balance_state()
 
 	success_count = 0
 	total_count = len(accounts)
 	notification_content = []
 	current_balances = {}
 	account_check_in_details = {}
+	account_successes = {}
 	need_notify = False
 	balance_changed = False
 
@@ -722,6 +776,7 @@ async def main():
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success:
 				success_count += 1
+			account_successes[account_key] = success
 
 			should_notify_this_account = False
 
@@ -759,6 +814,7 @@ async def main():
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
 						'success': success,
+						'comparison_available': True,
 					}
 
 			if should_notify_this_account:
@@ -795,6 +851,16 @@ async def main():
 	if balance_changed:
 		for i, account in enumerate(accounts):
 			account_key = f'account_{i + 1}'
+			if account_key in current_balances:
+				if account_key in last_balances:
+					account_check_in_details[account_key] = build_balance_comparison_detail(
+						account.get_display_name(i),
+						last_balances[account_key],
+						current_balances[account_key],
+						success=account_successes.get(account_key, False),
+					)
+				elif account_key in account_check_in_details:
+					account_check_in_details[account_key]['comparison_available'] = False
 			if account_key in account_check_in_details:
 				detail = account_check_in_details[account_key]
 				account_name = detail['name']
@@ -804,6 +870,7 @@ async def main():
 
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
+		save_balance_state(current_balances)
 
 	if need_notify and notification_content:
 		summary = [

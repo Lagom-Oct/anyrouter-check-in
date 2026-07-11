@@ -4,7 +4,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from checkin import generate_balance_hash
+import checkin
+from checkin import build_balance_comparison_detail, generate_balance_hash
 
 
 def test_balance_hash_changes_when_quota_changes():
@@ -32,3 +33,26 @@ def test_balance_hash_is_stable_for_equivalent_balances():
 	}
 
 	assert generate_balance_hash(left) == generate_balance_hash(right)
+
+
+def test_balance_comparison_detects_reward_despite_usage():
+	detail = build_balance_comparison_detail(
+		'AnyRouter-1',
+		{'quota': 649.58, 'used': 100.42},
+		{'quota': 473.62, 'used': 301.38},
+		success=True,
+	)
+
+	assert round(detail['check_in_reward'], 2) == 25.00
+	assert round(detail['usage_increase'], 2) == 200.96
+	assert round(detail['balance_change'], 2) == -175.96
+
+
+def test_balance_state_round_trip(tmp_path, monkeypatch):
+	state_file = tmp_path / 'balance_state.json'
+	monkeypatch.setattr(checkin, 'BALANCE_STATE_FILE', str(state_file))
+	balances = {'account_1': {'quota': 100.0, 'used': 20.0}}
+
+	checkin.save_balance_state(balances)
+
+	assert checkin.load_balance_state() == balances
