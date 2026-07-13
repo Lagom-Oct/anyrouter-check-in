@@ -3,6 +3,8 @@ on:
   schedule:
     # 避开 GitHub Actions 整点高峰；北京时间约 02:17 / 08:17 / 14:17 / 20:17。
     - cron: '17 */6 * * *'
+    # 临时调度探针：确认公开 Fork 的 schedule 已重新启用后删除。
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       debug:
